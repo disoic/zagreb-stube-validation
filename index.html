@@ -216,6 +216,26 @@ body {
   font-size: 10px; color: var(--ink-soft);
   margin-bottom: 8px; line-height: 1.3;
 }
+.pop-stepcount {
+  margin-bottom: 8px;
+  font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+  color: var(--ink-soft);
+}
+.pop-stepcount label {
+  display: flex; align-items: center; gap: 8px;
+}
+.pop-stepcount input {
+  width: 80px; padding: 5px 8px;
+  border: 1px solid var(--hairline); border-radius: 3px;
+  font-family: 'IBM Plex Mono', monospace; font-size: 12px;
+  color: var(--ink); background: var(--bg); outline: none;
+  -moz-appearance: textfield;
+}
+.pop-stepcount input:focus { border-color: var(--ink); }
+.pop-stepcount input::-webkit-outer-spin-button,
+.pop-stepcount input::-webkit-inner-spin-button {
+  -webkit-appearance: none; margin: 0;
+}
 .pop-actions { display: flex; flex-direction: column; gap: 5px; margin-bottom: 4px; }
 .pop-actions button {
   width: 100%; padding: 9px 10px; border-radius: 3px;
@@ -538,6 +558,7 @@ function allLocations() {
       source: 'osm',
       status: s.status || 'pending',
       notes: s.notes || '',
+      step_count: s.step_count != null ? s.step_count : null,
       visited_at: s.visited_at || null,
       group_id: s.group_id || null,
     });
@@ -549,6 +570,7 @@ function allLocations() {
       category: c.category || 'custom',
       status: c.status || 'pending',
       notes: c.notes || '',
+      step_count: c.step_count != null ? c.step_count : null,
       group_id: c.group_id || null,
     });
   }
@@ -641,7 +663,7 @@ function setNotes(loc, notes) {
   if (loc.source === 'osm') {
     const existing = state.osmStates[loc.id] || {};
     existing.notes = notes;
-    if (!notes && !existing.status) {
+    if (!notes && !existing.status && !existing.group_id && existing.step_count == null) {
       delete state.osmStates[loc.id];
     } else {
       state.osmStates[loc.id] = existing;
@@ -649,6 +671,42 @@ function setNotes(loc, notes) {
   } else {
     const c = state.customs.find(x => x.id === loc.id);
     if (c) c.notes = notes;
+  }
+  saveState();
+}
+
+// === STEP COUNT ===
+// Lives on the group when location is grouped, on the location otherwise.
+function getStepCount(loc) {
+  if (loc.group_id && state.groups[loc.group_id]) {
+    const g = state.groups[loc.group_id];
+    return g.step_count != null ? g.step_count : '';
+  }
+  return loc.step_count != null ? loc.step_count : '';
+}
+
+function setStepCount(loc, raw) {
+  const parsed = raw === '' || raw == null ? null : parseInt(raw, 10);
+  const value = (parsed != null && !isNaN(parsed) && parsed >= 0) ? parsed : null;
+  if (loc.group_id && state.groups[loc.group_id]) {
+    if (value == null) delete state.groups[loc.group_id].step_count;
+    else state.groups[loc.group_id].step_count = value;
+  } else if (loc.source === 'osm') {
+    const s = state.osmStates[loc.id] || {};
+    if (value == null) {
+      delete s.step_count;
+      if (!s.status && !s.notes && !s.group_id) delete state.osmStates[loc.id];
+      else state.osmStates[loc.id] = s;
+    } else {
+      s.step_count = value;
+      state.osmStates[loc.id] = s;
+    }
+  } else {
+    const c = state.customs.find(x => x.id === loc.id);
+    if (c) {
+      if (value == null) delete c.step_count;
+      else c.step_count = value;
+    }
   }
   saveState();
 }
@@ -676,10 +734,17 @@ function setLocConfirmed(locId, groupId, whenISO) {
 function confirmAsGroup(memberIds, name, notes) {
   const groupId = newGroupId();
   const now = new Date().toISOString();
+  // If any member already has a location-level step_count, use the first non-null one
+  let initialStepCount = null;
+  for (const id of memberIds) {
+    const m = allLocations().find(l => l.id === id);
+    if (m && m.step_count != null) { initialStepCount = m.step_count; break; }
+  }
   state.groups[groupId] = {
     id: groupId,
     name: name.trim(),
     notes: notes || '',
+    step_count: initialStepCount,
     created_at: now,
     visited_at: now,
   };
@@ -704,6 +769,7 @@ function addToTarget(locId, targetLocId) {
       id: groupId,
       name: target.name,
       notes: '',
+      step_count: target.step_count != null ? target.step_count : null,
       created_at: now,
       visited_at: target.visited_at || now,
     };
@@ -855,6 +921,9 @@ function popupHTML(loc) {
       ${groupBadge}
       ${distStr ? '<span>' + distStr + '</span>' : ''}
     </div>
+    <div class="pop-stepcount">
+      <label>Steps: <input type="number" inputmode="numeric" min="0" placeholder="—" data-loc-id="${loc.id}" data-field="step_count" value="${getStepCount(loc)}"></label>
+    </div>
     <textarea class="pop-notes" placeholder="Notes…" data-loc-id="${loc.id}">${escapeHtml(loc.notes)}</textarea>
     <div class="pop-actions">
       ${actionsHTML}
@@ -898,6 +967,13 @@ function attachPopupHandlers(loc) {
       ta.oninput = () => {
         const target = allLocations().find(l => l.id === ta.dataset.locId);
         if (target) setNotes(target, ta.value);
+      };
+    }
+    const stepInput = popupEl.querySelector('.pop-stepcount input');
+    if (stepInput) {
+      stepInput.oninput = () => {
+        const target = allLocations().find(l => l.id === stepInput.dataset.locId);
+        if (target) setStepCount(target, stepInput.value);
       };
     }
   }, 0);
@@ -1101,12 +1177,14 @@ function renderList() {
         ? (item.distance < 1000 ? item.distance.toFixed(0) + ' m' : (item.distance/1000).toFixed(1) + ' km')
         : '—';
       if (item._kind === 'group') {
+        const stepsHint = item.group.step_count != null ? `<span>${item.group.step_count} steps</span>` : '';
         row.innerHTML = `
           <div class="dot confirmed"></div>
           <div class="text">
             <div class="name">${escapeHtml(item.group.name)}</div>
             <div class="meta">
               <span>group · ${item.members.length} segments</span>
+              ${stepsHint}
             </div>
           </div>
           <div class="dist">${distStr}</div>
@@ -1129,6 +1207,7 @@ function renderList() {
                      : item.kind === 'unnamed' ? 'pending-unnamed'
                      : 'pending-osm';
         const idHint = item.osm_id ? `<span class="osm-id-mini">${escapeHtml(item.osm_id)}</span>` : '';
+        const stepsHint = item.step_count != null ? `<span>${item.step_count} steps</span>` : '';
         row.innerHTML = `
           <div class="dot ${dotClass}"></div>
           <div class="text">
@@ -1136,6 +1215,7 @@ function renderList() {
             <div class="meta">
               <span>${item.category}</span>
               ${idHint}
+              ${stepsHint}
               ${item.source === 'custom' ? '<span class="custom-badge">custom</span>' : ''}
             </div>
           </div>
@@ -1310,16 +1390,42 @@ document.getElementById('sheet-close').onclick = closeList;
 document.getElementById('overlay').onclick = closeList;
 
 // ========== EXPORT / IMPORT ==========
-document.getElementById('btn-export').onclick = () => {
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+async function exportData() {
+  const text = JSON.stringify(state, null, 2);
+  const stamp = new Date().toISOString().slice(0, 10);
+  const filename = `zagreb-stube-${stamp}.json`;
+
+  // Preferred path on mobile: native share sheet (Files / AirDrop / etc.)
+  if (navigator.canShare) {
+    try {
+      const file = new File([text], filename, { type: 'application/json' });
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: 'Zagreb stube backup' });
+        return;
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') return;  // user cancelled
+      console.warn('Share failed, falling back to download:', e);
+    }
+  }
+
+  // Fallback: anchor download — needs to be in the DOM and the URL must
+  // survive past the click on slower browsers.
+  const blob = new Blob([text], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  const stamp = new Date().toISOString().slice(0, 10);
   a.href = url;
-  a.download = `zagreb-stube-${stamp}.json`;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
-};
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 200);
+}
+
+document.getElementById('btn-export').onclick = exportData;
 document.getElementById('btn-import').onclick = () => document.getElementById('import-file').click();
 document.getElementById('import-file').onchange = (e) => {
   const file = e.target.files[0];
