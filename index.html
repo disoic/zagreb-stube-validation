@@ -287,6 +287,29 @@ body {
   cursor: pointer; padding: 0 8px; line-height: 1;
 }
 .sheet-body { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.status-tabs {
+  display: flex; gap: 5px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.status-tabs::-webkit-scrollbar { display: none; }
+.status-tab {
+  padding: 5px 11px; border-radius: 11px;
+  font-family: 'IBM Plex Mono', monospace; font-size: 10px;
+  background: var(--bg); border: 1px solid var(--hairline);
+  color: var(--ink-soft); cursor: pointer;
+  white-space: nowrap; user-select: none;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.status-tab.active {
+  background: var(--ink); color: var(--bg); border-color: var(--ink);
+}
+.status-tab .count { opacity: 0.6; margin-left: 5px; }
 .group-label {
   font-family: 'IBM Plex Mono', monospace; font-size: 9px;
   text-transform: uppercase; letter-spacing: 0.06em;
@@ -481,6 +504,7 @@ body {
       <div class="sheet-title">All locations</div>
       <button class="sheet-close" id="sheet-close">×</button>
     </div>
+    <div class="status-tabs" id="status-tabs"></div>
     <div class="sheet-body" id="sheet-body"></div>
     <div class="data-bar">
       <button id="btn-export">Export</button>
@@ -526,16 +550,17 @@ const STORAGE_KEY = 'zagreb-stube-v1';
 function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { osmStates: {}, customs: [], groups: {}, filters: { showRejected: false, category: 'all' } };
+    if (!raw) return { osmStates: {}, customs: [], groups: {}, filters: { showRejected: false, category: 'all', listStatus: 'all' } };
     const s = JSON.parse(raw);
     s.osmStates = s.osmStates || {};
     s.customs = s.customs || [];
     s.groups = s.groups || {};
-    s.filters = s.filters || { showRejected: false, category: 'all' };
+    s.filters = s.filters || { showRejected: false, category: 'all', listStatus: 'all' };
+    if (!s.filters.listStatus) s.filters.listStatus = 'all';
     return s;
   } catch (e) {
     console.error('State load failed', e);
-    return { osmStates: {}, customs: [], groups: {}, filters: { showRejected: false, category: 'all' } };
+    return { osmStates: {}, customs: [], groups: {}, filters: { showRejected: false, category: 'all', listStatus: 'all' } };
   }
 }
 function saveState() {
@@ -1085,9 +1110,57 @@ function renderStats() {
 
 // ========== LIST VIEW ==========
 let overlayOpen = false;
+const STATUS_TABS = [
+  { key: 'all', label: 'all' },
+  { key: 'pending', label: 'pending' },
+  { key: 'confirmed', label: 'confirmed' },
+  { key: 'rejected', label: 'rejected' },
+];
+
+function renderStatusTabs() {
+  const tabsEl = document.getElementById('status-tabs');
+  if (!tabsEl) return;
+  const all = allLocations();
+  const visible = l => matchesCategoryFilter(l);
+  // Aggregate confirmed by group for accurate count
+  const seenG = new Set();
+  let confirmedCount = 0;
+  for (const l of all) {
+    if (!visible(l)) continue;
+    if (l.status !== 'confirmed') continue;
+    if (l.group_id) {
+      if (seenG.has(l.group_id)) continue;
+      seenG.add(l.group_id);
+    }
+    confirmedCount++;
+  }
+  const counts = {
+    pending: all.filter(l => visible(l) && l.status === 'pending').length,
+    confirmed: confirmedCount,
+    rejected: all.filter(l => visible(l) && l.status === 'rejected').length,
+  };
+  counts.all = counts.pending + counts.confirmed + counts.rejected;
+
+  tabsEl.innerHTML = '';
+  const active = state.filters.listStatus || 'all';
+  for (const t of STATUS_TABS) {
+    const pill = document.createElement('div');
+    pill.className = 'status-tab' + (active === t.key ? ' active' : '');
+    pill.innerHTML = `${t.label}<span class="count">${counts[t.key]}</span>`;
+    pill.onclick = () => {
+      state.filters.listStatus = t.key;
+      saveState();
+      renderStatusTabs();
+      renderList();
+    };
+    tabsEl.appendChild(pill);
+  }
+}
+
 function openList() {
   overlayOpen = true;
   document.getElementById('overlay').classList.add('open');
+  renderStatusTabs();
   renderList();
 }
 function closeList() {
@@ -1145,13 +1218,20 @@ function renderList() {
     }
   }
 
-  const groups = [
-    { label: `pending — named (${pendingNamed.length})`, items: pendingNamed },
-    { label: `pending — unnamed steps (${pendingUnnamed.length})`, items: pendingUnnamed },
-    { label: `pending — your additions (${pendingCustom.length})`, items: pendingCustom },
-    { label: `confirmed (${confirmed.length})`, items: confirmed },
-  ];
-  if (state.filters.showRejected) {
+  const ls = state.filters.listStatus || 'all';
+  const groups = [];
+  if (ls === 'all' || ls === 'pending') {
+    groups.push(
+      { label: `pending — named (${pendingNamed.length})`, items: pendingNamed },
+      { label: `pending — unnamed steps (${pendingUnnamed.length})`, items: pendingUnnamed },
+      { label: `pending — your additions (${pendingCustom.length})`, items: pendingCustom },
+    );
+  }
+  if (ls === 'all' || ls === 'confirmed') {
+    groups.push({ label: `confirmed (${confirmed.length})`, items: confirmed });
+  }
+  // Rejected appears when the tab explicitly asks for it, or in 'all' with the showRejected toggle on
+  if (ls === 'rejected' || (ls === 'all' && state.filters.showRejected)) {
     groups.push({ label: `rejected (${rejected.length})`, items: rejected });
   }
 
@@ -1287,9 +1367,10 @@ document.getElementById('modal-cancel').onclick = () => {
 };
 document.getElementById('modal-save').onclick = () => {
   const name = document.getElementById('modal-input').value.trim();
-  if (!name || !pendingNewLatLng) return;
+  if (!name) { showToast('Name required'); return; }
+  if (!pendingNewLatLng) return;
   const id = 'custom_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
-  state.customs.push({
+  const newCustom = {
     id,
     name,
     lat: pendingNewLatLng[0],
@@ -1299,10 +1380,26 @@ document.getElementById('modal-save').onclick = () => {
     notes: '',
     visited_at: null,
     created_at: new Date().toISOString(),
-  });
+  };
+  state.customs.push(newCustom);
+  // Make sure the new pin is actually visible: any filter that excludes "custom" gets reset.
+  if (state.filters.category !== 'all' && state.filters.category !== 'other') {
+    state.filters.category = 'all';
+  }
+  if (state.filters.listStatus && state.filters.listStatus !== 'all' && state.filters.listStatus !== 'pending') {
+    state.filters.listStatus = 'all';
+  }
   saveState();
   document.getElementById('modal-name').classList.remove('open');
+  pendingNewLatLng = null;
   rerender();
+  showToast(`Added "${newCustom.name}"`);
+  // Pan to the new pin and open its popup for immediate next action
+  setTimeout(() => {
+    map.setView([newCustom.lat, newCustom.lon], 18);
+    const m = markers[newCustom.id];
+    if (m) setTimeout(() => m.openPopup(), 250);
+  }, 100);
 };
 document.getElementById('modal-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') document.getElementById('modal-save').click();
@@ -1438,8 +1535,10 @@ document.getElementById('import-file').onchange = (e) => {
       state = {
         osmStates: imported.osmStates || {},
         customs: imported.customs || [],
-        filters: imported.filters || { showRejected: false, category: 'all' },
+        groups: imported.groups || {},
+        filters: imported.filters || { showRejected: false, category: 'all', listStatus: 'all' },
       };
+      if (!state.filters.listStatus) state.filters.listStatus = 'all';
       saveState();
       rerender();
       showToast('Imported');
@@ -1464,7 +1563,10 @@ function rerender() {
   renderMarkers();
   renderFilters();
   renderStats();
-  if (overlayOpen) renderList();
+  if (overlayOpen) {
+    renderStatusTabs();
+    renderList();
+  }
 }
 
 // Initial paint
