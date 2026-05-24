@@ -1121,12 +1121,11 @@ function renderStatusTabs() {
   const tabsEl = document.getElementById('status-tabs');
   if (!tabsEl) return;
   const all = allLocations();
-  const visible = l => matchesCategoryFilter(l);
-  // Aggregate confirmed by group for accurate count
+  // Counts are over the entire dataset — the top-bar category filter is a
+  // map-only concern, the list and status tabs always reflect everything.
   const seenG = new Set();
   let confirmedCount = 0;
   for (const l of all) {
-    if (!visible(l)) continue;
     if (l.status !== 'confirmed') continue;
     if (l.group_id) {
       if (seenG.has(l.group_id)) continue;
@@ -1135,9 +1134,9 @@ function renderStatusTabs() {
     confirmedCount++;
   }
   const counts = {
-    pending: all.filter(l => visible(l) && l.status === 'pending').length,
+    pending: all.filter(l => l.status === 'pending').length,
     confirmed: confirmedCount,
-    rejected: all.filter(l => visible(l) && l.status === 'rejected').length,
+    rejected: all.filter(l => l.status === 'rejected').length,
   };
   counts.all = counts.pending + counts.confirmed + counts.rejected;
 
@@ -1237,18 +1236,14 @@ function renderList() {
 
   let anyContent = false;
   for (const g of groups) {
-    // Apply category filter (group entries pass if any member matches)
-    const filtered = g.items.filter(it => {
-      if (it._kind === 'group') {
-        return state.filters.category === 'all' || it.members.some(matchesCategoryFilter);
-      }
-      return matchesCategoryFilter(it);
-    });
+    // The list is the validation queue — show everything regardless of map's
+    // category filter. Status tab already filtered the tiers above.
+    const filtered = g.items;
     if (!filtered.length) continue;
     anyContent = true;
     const h = document.createElement('div');
     h.className = 'group-label';
-    h.textContent = g.label.replace(/\(\d+\)/, `(${filtered.length})`);
+    h.textContent = g.label;
     body.appendChild(h);
     for (const item of filtered) {
       const row = document.createElement('div');
