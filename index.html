@@ -529,6 +529,7 @@ body {
     <div class="data-bar">
       <button id="btn-export">Export</button>
       <button id="btn-import">Import</button>
+      <button id="btn-geojson">Export GeoJSON</button>
       <input type="file" id="import-file" accept=".json" style="display:none">
     </div>
   </div>
@@ -1558,6 +1559,109 @@ async function exportData() {
 }
 
 document.getElementById('btn-export').onclick = exportData;
+
+// Clean validated-only output for downstream apps:
+// one Feature per real-world staircase (group or standalone confirmed)
+async function exportValidatedGeoJSON() {
+  const all = allLocations();
+  const features = [];
+  const seenGroups = new Set();
+
+  for (const loc of all) {
+    if (loc.status !== 'confirmed') continue;
+
+    if (loc.group_id) {
+      if (seenGroups.has(loc.group_id)) continue;
+      seenGroups.add(loc.group_id);
+      const grp = state.groups[loc.group_id];
+      if (!grp) continue;
+      const members = getGroupMembers(loc.group_id);
+      const lats = members.map(m => m.lat);
+      const lons = members.map(m => m.lon);
+      const centroidLat = lats.reduce((a, b) => a + b, 0) / lats.length;
+      const centroidLon = lons.reduce((a, b) => a + b, 0) / lons.length;
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [centroidLon, centroidLat] },
+        properties: {
+          name: grp.name,
+          step_count: getGroupTotalSteps(loc.group_id),
+          notes: grp.notes || null,
+          visited_at: grp.visited_at,
+          source: 'group',
+          segments: members.length,
+          members: members.map(m => ({
+            osm_id: m.osm_id || null,
+            lat: m.lat,
+            lon: m.lon,
+            step_count: m.step_count != null ? m.step_count : null,
+            origin: m.source,
+          })),
+        },
+      });
+    } else {
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [loc.lon, loc.lat] },
+        properties: {
+          name: loc.name,
+          step_count: loc.step_count != null ? loc.step_count : null,
+          notes: loc.notes || null,
+          visited_at: loc.visited_at,
+          source: loc.source,
+          osm_id: loc.osm_id || null,
+        },
+      });
+    }
+  }
+
+  features.sort((a, b) => (a.properties.name || '').localeCompare(b.properties.name || '', 'hr'));
+
+  if (features.length === 0) {
+    showToast('No confirmed staircases yet');
+    return;
+  }
+
+  const fc = {
+    type: 'FeatureCollection',
+    generated_at: new Date().toISOString(),
+    source: 'zagreb-stube-tracker',
+    count: features.length,
+    features,
+  };
+
+  const text = JSON.stringify(fc, null, 2);
+  const stamp = new Date().toISOString().slice(0, 10);
+  const filename = `zagreb-stube-validated-${stamp}.geojson`;
+
+  if (navigator.canShare) {
+    try {
+      const file = new File([text], filename, { type: 'application/geo+json' });
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: 'Zagreb stube — validated' });
+        return;
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      console.warn('Share failed, falling back to download:', e);
+    }
+  }
+
+  const blob = new Blob([text], { type: 'application/geo+json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 200);
+}
+
+document.getElementById('btn-geojson').onclick = exportValidatedGeoJSON;
 document.getElementById('btn-import').onclick = () => document.getElementById('import-file').click();
 document.getElementById('import-file').onchange = (e) => {
   const file = e.target.files[0];
