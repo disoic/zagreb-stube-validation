@@ -301,6 +301,19 @@ body {
   scrollbar-width: none;
 }
 .status-tabs::-webkit-scrollbar { display: none; }
+.list-search-wrap {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface);
+}
+#list-search {
+  width: 100%; padding: 8px 11px;
+  border: 1px solid var(--hairline); border-radius: 4px;
+  font-family: 'IBM Plex Sans', sans-serif; font-size: 13px;
+  color: var(--ink); background: var(--bg); outline: none;
+}
+#list-search:focus { border-color: var(--ink); }
+#list-search::placeholder { color: var(--ink-soft); }
 .status-tab {
   padding: 5px 11px; border-radius: 11px;
   font-family: 'IBM Plex Mono', monospace; font-size: 10px;
@@ -509,6 +522,9 @@ body {
       <button class="sheet-close" id="sheet-close">×</button>
     </div>
     <div class="status-tabs" id="status-tabs"></div>
+    <div class="list-search-wrap">
+      <input type="search" id="list-search" placeholder="Search by name…" autocomplete="off" autocapitalize="none">
+    </div>
     <div class="sheet-body" id="sheet-body"></div>
     <div class="data-bar">
       <button id="btn-export">Export</button>
@@ -554,17 +570,21 @@ const STORAGE_KEY = 'zagreb-stube-v1';
 function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { osmStates: {}, customs: [], groups: {}, filters: { showRejected: false, category: 'all', listStatus: 'all' } };
+    if (!raw) return { osmStates: {}, customs: [], groups: {}, filters: { hideConfirmed: false, hideRejected: false, category: 'all', listStatus: 'all' } };
     const s = JSON.parse(raw);
     s.osmStates = s.osmStates || {};
     s.customs = s.customs || [];
     s.groups = s.groups || {};
-    s.filters = s.filters || { showRejected: false, category: 'all', listStatus: 'all' };
-    if (!s.filters.listStatus) s.filters.listStatus = 'all';
+    s.filters = s.filters || {};
+    s.filters.category = s.filters.category || 'all';
+    s.filters.listStatus = s.filters.listStatus || 'all';
+    if (s.filters.hideConfirmed === undefined) s.filters.hideConfirmed = false;
+    if (s.filters.hideRejected === undefined) s.filters.hideRejected = false;
+    delete s.filters.showRejected;  // legacy field
     return s;
   } catch (e) {
     console.error('State load failed', e);
-    return { osmStates: {}, customs: [], groups: {}, filters: { showRejected: false, category: 'all', listStatus: 'all' } };
+    return { osmStates: {}, customs: [], groups: {}, filters: { hideConfirmed: false, hideRejected: false, category: 'all', listStatus: 'all' } };
   }
 }
 function saveState() {
@@ -812,40 +832,6 @@ function addToTarget(locId, targetLocId) {
   refreshOverlay();
 }
 
-function removeFromGroup(loc) {
-  const groupId = loc.group_id;
-  if (!groupId) return;
-  // Detach AND revert to pending — the realistic use case is "this segment
-  // doesn't belong here, let me re-evaluate it", not "keep it confirmed alone".
-  if (loc.source === 'osm') {
-    const s = state.osmStates[loc.id] || {};
-    delete s.group_id;
-    delete s.status;
-    delete s.visited_at;
-    if (!s.notes && s.step_count == null) {
-      delete state.osmStates[loc.id];
-    } else {
-      state.osmStates[loc.id] = s;
-    }
-  } else {
-    const c = state.customs.find(x => x.id === loc.id);
-    if (c) {
-      delete c.group_id;
-      c.status = 'pending';
-      c.visited_at = null;
-    }
-  }
-  // Delete group if now empty
-  const remaining = allLocations().filter(l => l.group_id === groupId);
-  if (remaining.length === 0) delete state.groups[groupId];
-  saveState();
-  refreshMarker(loc.id);
-  renderStats();
-  renderFilters();
-  refreshOverlay();
-  showToast('Detached — back to pending');
-}
-
 // ========== MAP ==========
 const map = L.map('map', {
   zoomControl: false,
@@ -899,7 +885,8 @@ const cluster = L.markerClusterGroup({
 cluster.addTo(map);
 
 function shouldShowOnMap(loc) {
-  if (loc.status === 'rejected' && !state.filters.showRejected) return false;
+  if (loc.status === 'rejected' && state.filters.hideRejected) return false;
+  if (loc.status === 'confirmed' && state.filters.hideConfirmed) return false;
   if (!matchesCategoryFilter(loc)) return false;
   return true;
 }
@@ -944,9 +931,6 @@ function popupHTML(loc) {
       actionsHTML += `<button class="reject" data-act="rejected" data-id="${loc.id}">Reject</button>`;
     } else {
       actionsHTML += `<button class="confirm" data-act="confirmed" data-id="${loc.id}">Confirm</button>`;
-    }
-    if (grp) {
-      actionsHTML += `<button class="leave-group" data-act="leave-group" data-id="${loc.id}">Detach (back to pending)</button>`;
     }
   }
 
@@ -997,11 +981,6 @@ function attachPopupHandlers(loc) {
         if (act === 'attach') {
           const targetLocId = btn.dataset.target;
           addToTarget(id, targetLocId);
-          map.closePopup();
-          return;
-        }
-        if (act === 'leave-group') {
-          removeFromGroup(target);
           map.closePopup();
           return;
         }
@@ -1113,13 +1092,12 @@ const CATEGORIES = [
 function renderFilters() {
   const c = document.getElementById('filters');
   const all = allLocations();
-  const visible = l => l.status !== 'rejected' || state.filters.showRejected;
   const counts = {
-    all: all.filter(visible).length,
-    stube: all.filter(l => visible(l) && (l.category === 'stube' || l.category === 'stepenice/štengice')).length,
-    'šetalište': all.filter(l => visible(l) && l.category === 'šetalište').length,
-    other: all.filter(l => visible(l) && (l.category === 'other' || l.category === 'custom')).length,
-    unnamed: all.filter(l => visible(l) && l.category === 'unnamed').length,
+    all: all.length,
+    stube: all.filter(l => l.category === 'stube' || l.category === 'stepenice/štengice').length,
+    'šetalište': all.filter(l => l.category === 'šetalište').length,
+    other: all.filter(l => l.category === 'other' || l.category === 'custom').length,
+    unnamed: all.filter(l => l.category === 'unnamed').length,
   };
   c.innerHTML = '';
   for (const cat of CATEGORIES) {
@@ -1129,11 +1107,17 @@ function renderFilters() {
     p.onclick = () => { state.filters.category = cat.key; saveState(); rerender(); };
     c.appendChild(p);
   }
-  const p = document.createElement('div');
-  p.className = 'pill' + (state.filters.showRejected ? ' active' : '');
-  p.textContent = state.filters.showRejected ? 'hide rejected' : 'show rejected';
-  p.onclick = () => { state.filters.showRejected = !state.filters.showRejected; saveState(); rerender(); };
-  c.appendChild(p);
+  // Map declutter toggles — active = that status is hidden on the map
+  const pc = document.createElement('div');
+  pc.className = 'pill' + (state.filters.hideConfirmed ? ' active' : '');
+  pc.textContent = 'hide confirmed';
+  pc.onclick = () => { state.filters.hideConfirmed = !state.filters.hideConfirmed; saveState(); rerender(); };
+  c.appendChild(pc);
+  const pr = document.createElement('div');
+  pr.className = 'pill' + (state.filters.hideRejected ? ' active' : '');
+  pr.textContent = 'hide rejected';
+  pr.onclick = () => { state.filters.hideRejected = !state.filters.hideRejected; saveState(); rerender(); };
+  c.appendChild(pr);
 }
 
 function renderStats() {
@@ -1145,6 +1129,7 @@ function renderStats() {
 
 // ========== LIST VIEW ==========
 let overlayOpen = false;
+let listSearchQuery = '';
 const STATUS_TABS = [
   { key: 'all', label: 'all' },
   { key: 'pending', label: 'pending' },
@@ -1272,8 +1257,8 @@ function renderList() {
   if (ls === 'all' || ls === 'confirmed') {
     groups.push({ label: `confirmed (${confirmed.length})`, items: confirmed });
   }
-  // Rejected appears when the tab explicitly asks for it, or in 'all' with the showRejected toggle on
-  if (ls === 'rejected' || (ls === 'all' && state.filters.showRejected)) {
+  // Rejected tier shows on its own tab or under 'all' (map hide-toggles don't affect the list)
+  if (ls === 'rejected' || ls === 'all') {
     groups.push({ label: `rejected (${rejected.length})`, items: rejected });
   }
 
@@ -1281,7 +1266,13 @@ function renderList() {
   for (const g of groups) {
     // The list is the validation queue — show everything regardless of map's
     // category filter. Status tab already filtered the tiers above.
-    const filtered = g.items;
+    const q = (listSearchQuery || '').trim().toLowerCase();
+    const filtered = q
+      ? g.items.filter(it => {
+          const nm = (it._kind === 'group' ? it.group.name : it.name) || '';
+          return nm.toLowerCase().includes(q);
+        })
+      : g.items;
     if (!filtered.length) continue;
     anyContent = true;
     const h = document.createElement('div');
@@ -1351,7 +1342,8 @@ function renderList() {
     }
   }
   if (!anyContent) {
-    body.innerHTML = '<div class="empty">No locations in current filter.</div>';
+    const q = (listSearchQuery || '').trim();
+    body.innerHTML = `<div class="empty">${q ? `No names matching “${escapeHtml(q)}”.` : 'No locations in current filter.'}</div>`;
   }
 }
 
@@ -1523,6 +1515,10 @@ document.getElementById('fab-locate').onclick = () => {
 };
 document.getElementById('fab-list').onclick = openList;
 document.getElementById('sheet-close').onclick = closeList;
+document.getElementById('list-search').addEventListener('input', (e) => {
+  listSearchQuery = e.target.value;
+  renderList();
+});
 document.getElementById('overlay').onclick = closeList;
 
 // ========== EXPORT / IMPORT ==========
@@ -1575,7 +1571,7 @@ document.getElementById('import-file').onchange = (e) => {
         osmStates: imported.osmStates || {},
         customs: imported.customs || [],
         groups: imported.groups || {},
-        filters: imported.filters || { showRejected: false, category: 'all', listStatus: 'all' },
+        filters: imported.filters || { hideConfirmed: false, hideRejected: false, category: 'all', listStatus: 'all' },
       };
       if (!state.filters.listStatus) state.filters.listStatus = 'all';
       saveState();
